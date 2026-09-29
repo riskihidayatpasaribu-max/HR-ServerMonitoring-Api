@@ -1,0 +1,610 @@
+@page "/dashboard"
+@rendermode Microsoft.AspNetCore.Components.Web.RenderMode.InteractiveServer
+
+@using System.Net.Http.Json
+@using Microsoft.JSInterop
+@using HR.ServerMonitoring.Api.Models
+
+@inject HttpClient Http
+@inject IJSRuntime JS
+
+@implements IAsyncDisposable
+
+<div class="dashboard-shell">
+    <div class="dashboard-container">
+        <header class="topbar">
+            <div>
+                <div class="eyebrow"><span class="eyebrow-dot"></span> SERVER INFRASTRUCTURE</div>
+                <h1>Server Monitoring</h1>
+                <p>Real-time telemetry and diagnostics</p>
+            </div>
+            <div class="top-actions">
+                <div class="live-pill">
+                    <span class="live-dot"></span>
+                    <span>System Live</span>
+                </div>
+                <button class="sync-button" @onclick="async () => await RefreshDashboard()" disabled="@isRefreshing">
+                    <span class="sync-icon @(isRefreshing ? "spin" : "")">↻</span>
+                    Sync
+                </button>
+            </div>
+        </header>
+
+        @if (sensorData == null)
+        {
+            <div class="state-panel">Mengambil data monitoring...</div>
+        }
+        else
+        {
+            var latest = sensorData.OrderByDescending(x => x.Timestamp).FirstOrDefault();
+            var deviceCount = devices?.Count ?? sensorData.Select(x => x.DeviceId).Distinct().Count();
+            var onlineCount = devices?.Count(x => x.Status == "ONLINE") ?? 0;
+
+            <section class="metrics-grid">
+                <div class="metric-card neutral">
+                    <div class="metric-head"><span class="metric-icon">◈</span><span>TOTAL DATA</span></div>
+                    <div class="metric-value">@sensorData.Count</div>
+                    <div class="metric-caption">Sensor readings</div>
+                </div>
+                <div class="metric-card purple">
+                    <div class="metric-head"><span class="metric-icon">▣</span><span>DEVICES</span></div>
+                    <div class="metric-value">@deviceCount</div>
+                    <div class="metric-caption">@onlineCount active now</div>
+                    <div class="metric-bars">
+                        @for (var i = 0; i < Math.Max(deviceCount, 1); i++)
+                        {
+                            <span class="@(i < onlineCount ? "bar-active" : "bar-idle")"></span>
+                        }
+                    </div>
+                </div>
+                <div class="metric-card temp">
+                    <div class="metric-head"><span class="metric-icon">♨</span><span>TEMPERATURE</span></div>
+                    <div class="metric-value">@(latest?.Temperature.ToString("0.0") ?? "-") <small>°C</small></div>
+                    <div class="metric-caption">@(latest?.DeviceId ?? "No data")</div>
+                </div>
+                <div class="metric-card humidity">
+                    <div class="metric-head"><span class="metric-icon">◌</span><span>HUMIDITY</span></div>
+                    <div class="metric-value">@(latest?.Humidity.ToString("0.0") ?? "-") <small>%</small></div>
+                    <div class="metric-caption">@(latest?.DeviceId ?? "No data")</div>
+                </div>
+                <div class="metric-card gas">
+                    <div class="metric-head"><span class="metric-icon">≋</span><span>GAS LEVEL</span></div>
+                    <div class="metric-value">@(latest?.GasLevel.ToString("0.0") ?? "-")</div>
+                    <div class="metric-caption">@(latest?.DeviceId ?? "No data")</div>
+                </div>
+            </section>
+
+            <section class="section-block">
+                <div class="section-title-row">
+                    <div>
+                        <div class="section-kicker">DEVICE MONITORING</div>
+                        <h2>Node Details</h2>
+                    </div>
+                    <span class="node-count">@deviceCount node(s)</span>
+                </div>
+
+                <div class="node-panel">
+                    @if (devices == null || devices.Count == 0)
+                    {
+                        <div class="state-panel compact">Belum ada device.</div>
+                    }
+                    else
+                    {
+                        @foreach (var device in devices)
+                        {
+                            var telemetry = liveTelemetry.GetValueOrDefault(device.DeviceId);
+                            var overallSafe = telemetry?.OverallInRange ?? true;
+                            var online = device.Status == "ONLINE";
+
+                            <button class="node-row" @onclick="() => OpenDeviceLogs(device.DeviceId)">
+                                <div class="node-identity">
+                                    <div class="node-status @(online ? "online" : "offline")">
+                                        <span></span>@device.Status
+                                    </div>
+                                    <div class="node-name">@device.DeviceId</div>
+                                    <div class="node-location">@(telemetry?.Location ?? "Server monitoring node")</div>
+                                    <div class="node-health @(overallSafe ? "health-ok" : "health-alarm")">
+                                        <span>@(overallSafe ? "✓" : "!")</span>
+                                        @(overallSafe ? "All systems operational" : "Monitoring alert active")
+                                    </div>
+                                </div>
+
+                                <div class="sensor-detail-grid">
+                                    <div class="sensor-detail">
+                                        <div class="sensor-detail-head"><span>Temperature</span><b class="@(telemetry?.TemperatureInRange == false ? "danger" : "ok")">@(telemetry?.TemperatureInRange == false ? "ALARM" : "OK")</b></div>
+                                        <div class="sensor-number">@(telemetry?.Temperature?.ToString("0.0") ?? "-") <small>°C</small></div>
+                                        <div class="gauge"><span class="gauge-fill temp-fill" style="width:@GaugeWidth(telemetry?.Temperature, threshold?.TemperatureMin, threshold?.TemperatureMax)%"></span></div>
+                                        <div class="range"><span>Min: @(threshold?.TemperatureMin.ToString("0.0") ?? "-")°C</span><span>Max: @(threshold?.TemperatureMax.ToString("0.0") ?? "-")°C</span></div>
+                                    </div>
+                                    <div class="sensor-detail">
+                                        <div class="sensor-detail-head"><span>Humidity</span><b class="@(telemetry?.HumidityInRange == false ? "danger" : "ok")">@(telemetry?.HumidityInRange == false ? "ALARM" : "OK")</b></div>
+                                        <div class="sensor-number">@(telemetry?.Humidity?.ToString("0.0") ?? "-") <small>%</small></div>
+                                        <div class="gauge"><span class="gauge-fill humidity-fill" style="width:@GaugeWidth(telemetry?.Humidity, threshold?.HumidityMin, threshold?.HumidityMax)%"></span></div>
+                                        <div class="range"><span>Min: @(threshold?.HumidityMin.ToString("0.0") ?? "-")%</span><span>Max: @(threshold?.HumidityMax.ToString("0.0") ?? "-")%</span></div>
+                                    </div>
+                                    <div class="sensor-detail">
+                                        <div class="sensor-detail-head"><span>Gas Level</span><b class="@(telemetry?.GasInRange == false ? "danger" : "ok")">@(telemetry?.GasInRange == false ? "ALARM" : "OK")</b></div>
+                                        <div class="sensor-number">@(telemetry?.GasPercent?.ToString("0.0") ?? "-") <small>%</small></div>
+                                        <div class="gauge"><span class="gauge-fill gas-fill" style="width:@GaugeWidth(telemetry?.GasPercent, threshold?.GasLevelMin, threshold?.GasLevelMax)%"></span></div>
+                                        <div class="range"><span>Min: @(threshold?.GasLevelMin.ToString("0.0") ?? "-")</span><span>Max: @(threshold?.GasLevelMax.ToString("0.0") ?? "-")</span></div>
+                                    </div>
+                                </div>
+                                <div class="node-chevron">›</div>
+                            </button>
+                        }
+                    }
+                </div>
+                <div class="node-hint">Click a device to view its event history.</div>
+            </section>
+
+            <section class="threshold-panel">
+                <div class="threshold-header">
+                    <div>
+                        <div class="section-kicker">CONFIGURATION</div>
+                        <h2>Alert Thresholds</h2>
+                        <p>Configure safe operating ranges for monitoring alerts.</p>
+                    </div>
+                    <div class="settings-mark">⚙</div>
+                </div>
+
+                @if (threshold == null)
+                {
+                    <div class="state-panel compact">Mengambil konfigurasi threshold...</div>
+                }
+                else
+                {
+                    <div class="threshold-list">
+                        <div class="threshold-line">
+                            <div class="threshold-label"><span class="dot temp-dot"></span><div><b>Temperature</b><small>Operating range</small></div></div>
+                            <div class="threshold-input"><label>MINIMUM</label><div><input type="number" step="0.1" @bind="threshold.TemperatureMin" /><span>°C</span></div></div>
+                            <div class="threshold-input"><label>MAXIMUM</label><div><input type="number" step="0.1" @bind="threshold.TemperatureMax" /><span>°C</span></div></div>
+                        </div>
+                        <div class="threshold-line">
+                            <div class="threshold-label"><span class="dot humidity-dot"></span><div><b>Humidity</b><small>Relative humidity</small></div></div>
+                            <div class="threshold-input"><label>MINIMUM</label><div><input type="number" step="0.1" @bind="threshold.HumidityMin" /><span>%</span></div></div>
+                            <div class="threshold-input"><label>MAXIMUM</label><div><input type="number" step="0.1" @bind="threshold.HumidityMax" /><span>%</span></div></div>
+                        </div>
+                        <div class="threshold-line">
+                            <div class="threshold-label"><span class="dot gas-dot"></span><div><b>Gas Level</b><small>Gas concentration</small></div></div>
+                            <div class="threshold-input"><label>MINIMUM</label><div><input type="number" step="0.1" @bind="threshold.GasLevelMin" /></div></div>
+                            <div class="threshold-input"><label>MAXIMUM</label><div><input type="number" step="0.1" @bind="threshold.GasLevelMax" /></div></div>
+                        </div>
+                    </div>
+                    <div class="threshold-actions">
+                        <div class="threshold-notice">⚠ Changes affect monitoring alerts and are sent to the device through MQTT.</div>
+                        <button class="save-button" @onclick="SaveThreshold">Save Configuration</button>
+                    </div>
+                    @if (!string.IsNullOrWhiteSpace(thresholdMessage))
+                    {
+                        <div class="threshold-message @(thresholdMessage.Contains("berhasil", StringComparison.OrdinalIgnoreCase) ? "message-ok" : "message-error")">@thresholdMessage</div>
+                    }
+                }
+            </section>
+        }
+    </div>
+</div>
+
+@if (isDeviceLogOpen)
+{
+    <div class="modal-backdrop" @onclick="CloseDeviceLogs">
+        <div class="log-modal" @onclick:stopPropagation="true">
+            <div class="log-modal-header">
+                <div><div class="section-kicker">DEVICE EVENT HISTORY</div><h2>@selectedDeviceId</h2></div>
+                <button class="close-button" @onclick="CloseDeviceLogs">×</button>
+            </div>
+            @if (isLoadingDeviceLogs)
+            {
+                <div class="state-panel compact">Mengambil event...</div>
+            }
+            else if (selectedDeviceEvents.Count == 0)
+            {
+                <div class="empty-log"><span>◌</span><b>No events recorded</b><small>Belum ada event untuk device ini.</small></div>
+            }
+            else
+            {
+                <div class="event-list">
+                    @foreach (var ev in selectedDeviceEvents)
+                    {
+                        <div class="event-row">
+                            <div class="event-time">@ev.Timestamp.ToLocalTime().ToString("dd MMM yyyy HH:mm:ss")</div>
+                            <div class="event-marker @(ev.EventType.ToLowerInvariant())"></div>
+                            <div class="event-content"><div class="event-title">@ev.EventType.Replace("_", " ").ToUpperInvariant()</div><div class="event-message">@(ev.Message ?? "-")</div>@if (!string.IsNullOrWhiteSpace(ev.FromLevel) || !string.IsNullOrWhiteSpace(ev.ToLevel)){<div class="event-level">@(ev.FromLevel ?? "-") → @(ev.ToLevel ?? "-")</div>}</div>
+                        </div>
+                    }
+                </div>
+            }
+        </div>
+    </div>
+}
+
+<style>
+    .dashboard-shell{min-height:100vh;background:#f6f8fc;color:#172033;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;padding:28px 24px 56px}.dashboard-container{max-width:1320px;margin:auto}.topbar{display:flex;justify-content:space-between;align-items:center;gap:24px;border-bottom:1px solid #e3e7ef;padding:8px 0 24px;margin-bottom:28px}.eyebrow,.section-kicker{font-size:10px;font-weight:800;letter-spacing:.16em;color:#68738a}.eyebrow-dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:#5267e8;margin-right:7px}.topbar h1{font-size:30px;line-height:1.1;margin:7px 0 7px;font-weight:800;letter-spacing:-.03em}.topbar p{margin:0;color:#7b8495;font-size:13px}.top-actions{display:flex;align-items:center;gap:14px}.live-pill{display:flex;align-items:center;gap:8px;background:#fff;border:1px solid #e4e8ef;border-radius:999px;padding:9px 14px;font-size:12px;font-weight:700;color:#566173;box-shadow:0 3px 12px rgba(22,32,51,.04)}.live-dot{width:8px;height:8px;border-radius:50%;background:#16a36a;box-shadow:0 0 0 4px #e5f7ef}.sync-button{border:0;background:transparent;color:#69758a;font-weight:700;cursor:pointer;padding:9px 4px}.sync-button:hover{color:#5367e8}.sync-icon{font-size:18px;display:inline-block;margin-right:4px}.spin{animation:spin 1s linear infinite}@@keyframes spin{to{transform:rotate(360deg)}}.metrics-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:16px;margin-bottom:34px}.metric-card{background:#fff;border:1px solid #e6eaf0;border-radius:16px;padding:18px;min-height:132px;box-shadow:0 5px 18px rgba(27,38,63,.035)}.metric-head{display:flex;align-items:center;gap:9px;font-size:10px;font-weight:800;letter-spacing:.13em;color:#69758a}.metric-icon{width:28px;height:28px;display:grid;place-items:center;border-radius:8px;background:#eef1ff;color:#5668e7;font-size:16px}.metric-card.purple .metric-icon{background:#f1ebff;color:#8a5ae8}.metric-card.temp{background:linear-gradient(135deg,#fff6ee,#fff)}.metric-card.temp .metric-icon{background:#ffeadb;color:#e8752f}.metric-card.humidity{background:linear-gradient(135deg,#effbff,#fff)}.metric-card.humidity .metric-icon{background:#ddf6fc;color:#16a2bf}.metric-card.gas{background:linear-gradient(135deg,#effcf9,#fff)}.metric-card.gas .metric-icon{background:#dff7f0;color:#159979}.metric-value{font-size:28px;font-weight:850;letter-spacing:-.03em;margin-top:17px}.metric-value small{font-size:15px;color:#7d8797}.metric-caption{font-size:12px;color:#8992a2;margin-top:3px}.metric-bars{display:flex;gap:3px;margin-top:13px}.metric-bars span{height:4px;flex:1;border-radius:5px}.bar-active{background:#2cb47a}.bar-idle{background:#e4e8ee}.section-block{margin-bottom:30px}.section-title-row{display:flex;justify-content:space-between;align-items:end;margin-bottom:12px}.section-title-row h2,.threshold-header h2,.log-modal h2{font-size:19px;margin:5px 0 0;letter-spacing:-.02em}.node-count{font-size:12px;color:#7d8798}.node-panel{background:#fff;border:1px solid #e4e8ef;border-radius:16px;overflow:hidden;box-shadow:0 5px 18px rgba(27,38,63,.035)}.node-row{width:100%;border:0;border-bottom:1px solid #edf0f4;background:#fff;text-align:left;padding:22px;display:grid;grid-template-columns:260px 1fr 22px;gap:24px;align-items:center;cursor:pointer;transition:background .15s}.node-row:last-child{border-bottom:0}.node-row:hover{background:#fbfcff}.node-identity{min-width:0}.node-status{display:inline-flex;align-items:center;gap:7px;font-size:10px;font-weight:800;letter-spacing:.1em}.node-status span{width:7px;height:7px;border-radius:50%}.node-status.online{color:#15936a}.node-status.online span{background:#20b879}.node-status.offline{color:#c34a4a}.node-status.offline span{background:#d65b5b}.node-name{font-size:18px;font-weight:800;margin-top:7px}.node-location{font-size:12px;color:#8790a0;margin-top:2px}.node-health{display:flex;align-items:center;gap:7px;margin-top:15px;font-size:11px;font-weight:700}.health-ok{color:#15936a}.health-alarm{color:#c34848}.node-chevron{font-size:27px;color:#aeb5c1}.sensor-detail-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:28px}.sensor-detail{min-width:0}.sensor-detail-head{display:flex;justify-content:space-between;color:#707a8c;font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.06em}.sensor-detail-head b{font-size:9px}.ok{color:#20a873}.danger{color:#cf4b4b}.sensor-number{font-size:30px;font-weight:850;margin-top:7px;letter-spacing:-.03em}.sensor-number small{font-size:13px;color:#8790a0}.gauge{height:6px;background:#edf0f4;border-radius:99px;margin-top:14px;overflow:hidden}.gauge-fill{display:block;height:100%;border-radius:99px;min-width:2px}.temp-fill{background:#ef914d}.humidity-fill{background:#27aac4}.gas-fill{background:#2aa88a}.range{display:flex;justify-content:space-between;gap:8px;font-size:9px;color:#9aa2b0;margin-top:6px}.node-hint{font-size:11px;color:#929aaa;margin-top:8px}.threshold-panel{background:#fff;border:1px solid #e4e8ef;border-radius:16px;padding:26px;box-shadow:0 5px 18px rgba(27,38,63,.035)}.threshold-header{display:flex;justify-content:space-between;align-items:start;border-bottom:1px solid #edf0f4;padding-bottom:20px}.threshold-header p{font-size:12px;color:#818b9b;margin:7px 0 0}.settings-mark{font-size:26px;color:#7b8799;opacity:.55}.threshold-list{max-width:930px}.threshold-line{display:grid;grid-template-columns:1.25fr 1fr 1fr;gap:26px;align-items:end;padding:20px 0;border-bottom:1px solid #f0f2f5}.threshold-label{display:flex;align-items:center;gap:12px}.threshold-label b{display:block;font-size:13px}.threshold-label small{display:block;color:#9099a8;font-size:10px;margin-top:3px}.dot{width:9px;height:9px;border-radius:50%;display:block}.temp-dot{background:#ef914d}.humidity-dot{background:#27aac4}.gas-dot{background:#2aa88a}.threshold-input label{display:block;font-size:9px;font-weight:800;letter-spacing:.12em;color:#9199a8;margin-bottom:7px}.threshold-input>div{position:relative}.threshold-input input{width:100%;box-sizing:border-box;background:#f7f8fb;border:1px solid #e1e5eb;border-radius:10px;padding:11px 38px 11px 12px;font-size:14px;font-weight:700;color:#1c2638;outline:none}.threshold-input input:focus{background:#fff;border-color:#6878e9;box-shadow:0 0 0 3px #edf0ff}.threshold-input span{position:absolute;right:12px;top:50%;transform:translateY(-50%);font-size:11px;font-weight:700;color:#9aa2b0}.threshold-actions{display:flex;align-items:center;justify-content:space-between;gap:18px;padding-top:20px}.threshold-notice{font-size:11px;color:#8a7480;background:#fff9e9;border:1px solid #f3e5ba;padding:9px 11px;border-radius:9px}.save-button{border:0;background:#5869df;color:#fff;border-radius:10px;padding:12px 19px;font-size:12px;font-weight:800;cursor:pointer;box-shadow:0 6px 14px rgba(88,105,223,.18)}.save-button:hover{background:#4859ce}.threshold-message{margin-top:12px;font-size:11px;padding:9px 11px;border-radius:8px}.message-ok{background:#eaf8f2;color:#18835f}.message-error{background:#fff0f0;color:#b63f3f}.state-panel{padding:35px;text-align:center;background:#fff;border:1px solid #e4e8ef;border-radius:16px;color:#7c8697}.state-panel.compact{padding:22px;border-radius:0;border:0;background:transparent}.modal-backdrop{position:fixed;inset:0;background:rgba(18,25,40,.48);display:flex;align-items:center;justify-content:center;padding:22px;z-index:1000}.log-modal{width:min(850px,100%);max-height:82vh;overflow:auto;background:#fff;border-radius:18px;box-shadow:0 24px 80px rgba(0,0,0,.2)}.log-modal-header{display:flex;justify-content:space-between;align-items:center;padding:22px 24px;border-bottom:1px solid #edf0f4;position:sticky;top:0;background:#fff;z-index:2}.close-button{border:0;background:#f1f3f6;color:#6e7788;width:32px;height:32px;border-radius:50%;font-size:22px;cursor:pointer}.event-list{padding:8px 24px 20px}.event-row{display:grid;grid-template-columns:150px 12px 1fr;gap:14px;padding:17px 0;border-bottom:1px solid #eef1f5}.event-time{font-size:10px;color:#929aaa;padding-top:2px}.event-marker{width:8px;height:8px;border-radius:50%;margin-top:5px;background:#7c88e8}.event-marker.connection{background:#27a979}.event-marker.threshold{background:#e19a45}.event-marker.threshold_update{background:#7181e7}.event-marker.level_change{background:#d56868}.event-title{font-size:10px;font-weight:850;letter-spacing:.1em;color:#657083}.event-message{font-size:12px;color:#343e50;margin-top:5px;line-height:1.5}.event-level{display:inline-block;margin-top:7px;padding:4px 7px;background:#f2f4f8;border-radius:5px;font-size:9px;color:#758093}.empty-log{padding:55px 20px;text-align:center;color:#8892a2}.empty-log span{display:block;font-size:28px;margin-bottom:10px}.empty-log b{display:block;color:#4f5a6d;font-size:13px}.empty-log small{display:block;margin-top:4px;font-size:11px}@@media(max-width:1050px){.metrics-grid{grid-template-columns:repeat(2,1fr)}.node-row{grid-template-columns:1fr}.sensor-detail-grid{grid-template-columns:repeat(3,1fr)}}@@media(max-width:700px){.dashboard-shell{padding:18px 12px 40px}.topbar{align-items:flex-start;flex-direction:column}.top-actions{width:100%;justify-content:space-between}.metrics-grid{grid-template-columns:1fr}.node-row{padding:17px}.sensor-detail-grid{grid-template-columns:1fr;gap:18px}.threshold-line{grid-template-columns:1fr}.threshold-actions{align-items:stretch;flex-direction:column}.save-button{width:100%}.event-row{grid-template-columns:1fr 10px 2fr}.event-time{grid-column:1/-1}.threshold-panel{padding:19px}}
+</style>
+
+@code
+{
+    
+    private List<SensorData>? sensorData;
+
+    private readonly Dictionary<string, MqttTelemetry> liveTelemetry = new();
+
+    private DotNetObjectReference<Dashboard>? dotNetReference;
+
+    private SensorThreshold? threshold;
+    private string? thresholdMessage;
+
+    private sealed class ThresholdUpdateResponse
+    {
+        public SensorThreshold? Threshold { get; set; }
+        public bool Esp32CommandSent { get; set; }
+    }
+
+    private async Task SaveThreshold()
+    {
+        thresholdMessage = null;
+
+        if (threshold == null)
+            return;
+
+        if (threshold.TemperatureMin >= threshold.TemperatureMax)
+        {
+            thresholdMessage =
+                "Temperature minimum harus lebih kecil dari maximum.";
+            return;
+        }
+
+        if (threshold.HumidityMin >= threshold.HumidityMax)
+        {
+            thresholdMessage =
+                "Humidity minimum harus lebih kecil dari maximum.";
+            return;
+        }
+
+        if (threshold.GasLevelMin >= threshold.GasLevelMax)
+        {
+            thresholdMessage =
+                "Gas level minimum harus lebih kecil dari maximum.";
+            return;
+        }
+
+        var response = await Http.PutAsJsonAsync(
+            "http://localhost:5186/api/Threshold",
+            threshold);
+
+        if (response.IsSuccessStatusCode)
+        {
+            foreach (var telemetry in liveTelemetry.Values)
+            {
+                ApplyThreshold(telemetry);
+            }
+
+            var result = await response.Content
+                .ReadFromJsonAsync<ThresholdUpdateResponse>();
+
+            thresholdMessage = result?.Esp32CommandSent == true
+                ? "Threshold berhasil disimpan dan dikirim ke ESP32."
+                : "Threshold berhasil disimpan, tetapi ESP32 belum terhubung sehingga command belum terkirim.";
+
+            await InvokeAsync(StateHasChanged);
+        }
+        else
+        {
+            var error = await response.Content.ReadAsStringAsync();
+
+            thresholdMessage = string.IsNullOrWhiteSpace(error)
+                ? "Gagal menyimpan threshold."
+                : $"Gagal menyimpan threshold: {error}";
+        }
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        sensorData = await Http.GetFromJsonAsync<List<SensorData>>(
+            "http://localhost:5186/api/SensorData");
+
+
+        threshold = await Http.GetFromJsonAsync<SensorThreshold>(
+            "http://localhost:5186/api/Threshold");
+
+        devices = await Http.GetFromJsonAsync<List<DeviceStatus>>(
+            "http://localhost:5186/api/Device");
+    }
+
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            dotNetReference = DotNetObjectReference.Create(this);
+
+            await JS.InvokeVoidAsync(
+                "sensorSignalR.start",
+                dotNetReference);
+        }
+    }
+
+    [JSInvokable]
+    public async Task ReceiveSensorData(SensorData data)
+    {
+        Console.WriteLine(
+            $"BLAZOR RECEIVED: {data.DeviceId} | " +
+            $"{data.Temperature} | " +
+            $"{data.Humidity} | " +
+            $"{data.GasLevel}");
+
+        sensorData ??= new List<SensorData>();
+
+        sensorData.Add(data);
+
+        // Update daftar device
+        devices = await Http.GetFromJsonAsync<List<DeviceStatus>>(
+            "http://localhost:5186/api/Device");
+
+        await InvokeAsync(StateHasChanged);
+    }
+
+    [JSInvokable]
+    public async Task ReceiveMqttTelemetry(MqttTelemetry data)
+    {
+        Console.WriteLine(
+            $"MQTT BLAZOR RECEIVED: {data.DeviceId} | " +
+            $"{data.Temperature} | " +
+            $"{data.Humidity} | " +
+            $"{data.GasPercent}");
+
+        if (string.IsNullOrEmpty(data.DeviceId))
+            return;
+
+        ApplyThreshold(data);
+
+        liveTelemetry[data.DeviceId] = data;
+
+        // Pastikan device ada
+        devices ??= new List<DeviceStatus>();
+
+        var device = devices.FirstOrDefault(
+            x => x.DeviceId == data.DeviceId);
+
+        if (device == null)
+        {
+            device = new DeviceStatus
+            {
+                DeviceId = data.DeviceId,
+                Status = "ONLINE",
+                LastSeen = DateTime.UtcNow
+            };
+
+            devices.Add(device);
+        }
+        else
+        {
+            device.Status = "ONLINE";
+            device.LastSeen = DateTime.UtcNow;
+        }
+
+        // Simpan ke sensorData agar card atas juga berubah
+        if (data.Temperature.HasValue &&
+            data.Humidity.HasValue &&
+            data.GasPercent.HasValue)
+        {
+            sensorData ??= new List<SensorData>();
+
+            sensorData.Add(new SensorData
+            {
+                DeviceId = data.DeviceId,
+                Temperature = data.Temperature.Value,
+                Humidity = data.Humidity.Value,
+                GasLevel = data.GasPercent.Value,
+                Timestamp = data.ReceivedAt
+            });
+        }
+
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private void ApplyThreshold(MqttTelemetry data)
+    {
+        if (threshold == null)
+            return;
+
+        data.TemperatureInRange =
+            !data.Temperature.HasValue ||
+            (data.Temperature.Value >= threshold.TemperatureMin &&
+             data.Temperature.Value <= threshold.TemperatureMax);
+
+        data.HumidityInRange =
+            !data.Humidity.HasValue ||
+            (data.Humidity.Value >= threshold.HumidityMin &&
+             data.Humidity.Value <= threshold.HumidityMax);
+
+        data.GasInRange =
+            !data.GasPercent.HasValue ||
+            (data.GasPercent.Value >= threshold.GasLevelMin &&
+             data.GasPercent.Value <= threshold.GasLevelMax);
+
+        // OVERALL sekarang mengikuti threshold yang diatur user melalui web.
+        data.OverallLevel =
+            data.OverallInRange
+                ? "ok"
+                : "alarm";
+    }
+
+    public class MqttTelemetry
+    {
+        public bool TemperatureInRange { get; set; }
+        public bool HumidityInRange { get; set; }
+        public bool GasInRange { get; set; }
+
+        public bool OverallInRange =>
+            TemperatureInRange &&
+            HumidityInRange &&
+            GasInRange;
+        public string? DeviceId { get; set; }
+        public string? Location { get; set; }
+        public string? Firmware { get; set; }
+
+        public long UptimeS { get; set; }
+        public long AgeMs { get; set; }
+
+        public double? Temperature { get; set; }
+        public double? Humidity { get; set; }
+
+        public int? GasRaw { get; set; }
+        public double? GasPercent { get; set; }
+
+        public string? TemperatureLevel { get; set; }
+        public string? HumidityLevel { get; set; }
+        public string? GasLevel { get; set; }
+        public string? OverallLevel { get; set; }
+
+        public int Rssi { get; set; }
+
+        public DateTime ReceivedAt { get; set; }
+    }
+
+    [JSInvokable]
+    public async Task ReceiveDeviceStatus(DeviceStatusMessage data)
+    {
+        Console.WriteLine(
+            $"MQTT STATUS BLAZOR RECEIVED: {data.DeviceId} | {data.Status}");
+
+        devices ??= new List<DeviceStatus>();
+
+        var device = devices.FirstOrDefault(
+            x => x.DeviceId == data.DeviceId);
+
+        if (device == null)
+        {
+            device = new DeviceStatus
+            {
+                DeviceId = data.DeviceId
+            };
+
+            devices.Add(device);
+        }
+
+        device.Status = data.Status.ToUpperInvariant();
+        device.LastSeen = DateTime.UtcNow;
+
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private static string GetLevelCss(string? level)
+    {
+        return level?.ToLowerInvariant() switch
+        {
+            "ok" => "safe",
+            "warning" => "warning",
+            "alarm" => "unsafe",
+            _ => ""
+        };
+    }
+
+    public ValueTask DisposeAsync()
+    {
+
+        dotNetReference?.Dispose();
+
+        return ValueTask.CompletedTask;
+    }
+
+
+    private class DeviceStatus
+    {
+        public string DeviceId { get; set; } = "";
+        public DateTime LastSeen { get; set; }
+        public string Status { get; set; } = "";
+    }
+
+    private List<DeviceStatus>? devices;
+
+
+    private bool isRefreshing;
+
+    private async Task RefreshDashboard()
+    {
+        isRefreshing = true;
+        try
+        {
+            sensorData = await Http.GetFromJsonAsync<List<SensorData>>(
+                "http://localhost:5186/api/SensorData");
+
+            threshold = await Http.GetFromJsonAsync<SensorThreshold>(
+                "http://localhost:5186/api/Threshold");
+
+            devices = await Http.GetFromJsonAsync<List<DeviceStatus>>(
+                "http://localhost:5186/api/Device");
+        }
+        catch
+        {
+            // Pertahankan data realtime yang sudah ada jika refresh API gagal.
+        }
+        finally
+        {
+            isRefreshing = false;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private static int GaugeWidth(double? value, double? min, double? max)
+    {
+        if (!value.HasValue || !min.HasValue || !max.HasValue || max <= min)
+            return 0;
+
+        var percentage = (value.Value - min.Value) / (max.Value - min.Value) * 100.0;
+        return Math.Clamp((int)Math.Round(percentage), 3, 100);
+    }
+
+    private string? selectedDeviceId;
+    private List<DeviceEventRow> selectedDeviceEvents = new();
+    private bool isDeviceLogOpen;
+    private bool isLoadingDeviceLogs;
+
+    private async Task OpenDeviceLogs(string deviceId)
+    {
+        selectedDeviceId = deviceId;
+        isDeviceLogOpen = true;
+        isLoadingDeviceLogs = true;
+        selectedDeviceEvents.Clear();
+
+        try
+        {
+            var events = await Http.GetFromJsonAsync<List<DeviceEventRow>>(
+                "http://localhost:5186/api/DeviceEvents");
+
+            selectedDeviceEvents = events?
+                .Where(x => x.DeviceId == deviceId)
+                .OrderByDescending(x => x.Timestamp)
+                .Take(100)
+                .ToList() ?? new List<DeviceEventRow>();
+        }
+        catch
+        {
+            selectedDeviceEvents = new List<DeviceEventRow>();
+        }
+        finally
+        {
+            isLoadingDeviceLogs = false;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private void CloseDeviceLogs()
+    {
+        isDeviceLogOpen = false;
+        selectedDeviceId = null;
+        selectedDeviceEvents.Clear();
+    }
+
+    private sealed class DeviceEventRow
+    {
+        public int Id { get; set; }
+        public string DeviceId { get; set; } = "";
+        public string EventType { get; set; } = "";
+        public string? FromLevel { get; set; }
+        public string? ToLevel { get; set; }
+        public string? Message { get; set; }
+        public DateTime Timestamp { get; set; }
+    }
+
+}
